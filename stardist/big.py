@@ -183,6 +183,7 @@ class Block:
         neighboring blocks are overlapping.
 
         """
+        print(min_overlap,context,block_size,size)
         assert 0 <= min_overlap+2*context < block_size <= size
         assert 0 < grid <= block_size
         block_size = _grid_divisible(grid, block_size, name='block_size', verbose=verbose)
@@ -267,6 +268,9 @@ class Block:
         # sanity checks
         assert first.start == 0 and last.end == size_orig
         assert all(t.overlap-2*context >= min_overlap for t in blocks if t != last)
+        # for t in blocks:
+        #     if t != last:
+                # print(t, t.slice_write.stop-t.succ.slice_write.start, min_overlap) 
         assert all(t.slice_write.stop-t.succ.slice_write.start >= min_overlap for t in blocks if t != last)
         assert all(t.start % grid == 0 and t.end % grid == 0 for t in blocks if t != last)
         # print(); [print(t) for t in first]
@@ -303,8 +307,37 @@ class BlockND:
     def slice_read(self, axes=None):
         return tuple(t.slice_read for t in self.blocks_for_axes(axes))
 
-    def slice_crop_context(self, axes=None):
-        return tuple(t.slice_crop_context for t in self.blocks_for_axes(axes))
+    # def slice_crop_context(self, axes=None):
+    #     return tuple(t.slice_crop_context for t in self.blocks_for_axes(axes))
+
+    def slice_crop_context(self, axes=None, scale_factors=(1, 1, 1)):
+        """
+        Get slices for cropping the context, scaled for all dimensions.
+
+        Parameters:
+        -----------
+        axes : str or None
+            Axes to consider (default: all axes).
+        scale_factors : tuple of float
+            Scaling factors for each axis (e.g., (0.5, 1, 1) for half-size in the first dimension).
+
+        Returns:
+        --------
+        tuple of slice
+            Slices adjusted for scaling factors.
+        """
+        slices = []
+        axes = self.axes if axes is None else axes_check_and_normalize(axes)
+        scale_factors = tuple(scale_factors)  # Ensure scale_factors is a tuple
+
+        for axis, block, scale in zip(axes, self.blocks_for_axes(axes), scale_factors):
+            s = block.slice_crop_context
+            # Apply scaling factor to start and stop
+            if scale != 1:
+                s = slice(int(s.start * scale), int(s.stop * scale))
+            slices.append(s)
+        
+        return tuple(slices)
 
     def slice_write(self, axes=None):
         return tuple(t.slice_write for t in self.blocks_for_axes(axes))
@@ -313,17 +346,25 @@ class BlockND:
         """Read block "read region" from x (numpy.ndarray or similar)"""
         return x[self.slice_read(axes)]
 
-    def crop_context(self, labels, axes=None):
-        return labels[self.slice_crop_context(axes)]
+    def crop_context(self, labels, axes=None,scale_factors=(1, 1, 1)):
+        return labels[self.slice_crop_context(axes,scale_factors)]
 
-    def write(self, x, labels, axes=None):
+    def write(self, x, labels, axes=None,scale_factors=(1, 1, 1)):
         """Write (only entries > 0 of) labels to block "write region" of x (numpy.ndarray or similar)"""
         s = self.slice_write(axes)
+        scaled_slices = []
+        # Scale each slice according to the scale factors
+        for sl, scale in zip(s, scale_factors):
+            if scale != 1:
+                scaled_slices.append(slice(int(sl.start * scale), int(sl.stop * scale)))
+            else:
+                scaled_slices.append(sl)
+
         mask = labels > 0
         # x[s][mask] = labels[mask] # doesn't work with zarr
-        region = x[s]
+        region = x[tuple(scaled_slices)]
         region[mask] = labels[mask]
-        x[s] = region
+        x[tuple(scaled_slices)] = region
 
     def is_responsible(self, slices, axes=None):
         return all(t.is_responsible((s.start,s.stop)) for t,s in zip(self.blocks_for_axes(axes),slices))
@@ -402,6 +443,7 @@ class BlockND:
             return labels_filtered
         else:
             # it is assumed that ids in 'labels' map to entries in 'polys'
+            # print(isinstance(polys,dict),any(k in polys for k in COORD_KEYS))
             assert isinstance(polys,dict) and any(k in polys for k in COORD_KEYS)
             filtered_labels = np.unique(labels_filtered)
             filtered_ind = [i-1 for i in filtered_labels if i > 0]
